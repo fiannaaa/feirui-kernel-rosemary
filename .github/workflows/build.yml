@@ -2,22 +2,11 @@ name: Build FeiRui Kernel
 
 on:
   workflow_dispatch:
-    inputs:
-      enable_ksu:
-        description: 'Integrate KernelSU Next'
-        required: true
-        type: boolean
-        default: true
-      enable_susfs:
-        description: 'Integrate SuSFS'
-        required: true
-        type: boolean
-        default: true
 
 jobs:
   build:
-    name: Compile FeiRui Kernel for Rosemary
-    runs-on: ubuntu-22.04
+    name: Compile FeiRui Kernel for Rosemary (MT6785)
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
@@ -27,185 +16,86 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            bc bison ca-certificates curl flex gcc g++ git libc6-dev libssl-dev make \
-            python3 python3-pip libelf-dev cpio zip unzip libncurses5-dev \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+            build-essential bc bison flex libssl-dev libelf-dev zip curl python3 ccache cpio unzip
           sudo apt-get clean
 
-      - name: Clone Kernel Source (Rosemary 4.19)
+      - name: Clone Rosemary Android 16 Kernel Source (4.19.325)
         run: |
-          echo "Cloning rosemary kernel tree..."
-          git clone --depth=1 -b inline https://github.com/silont-project/kernel_xiaomi_rosemary.git kernel_workspace
+          echo "Cloning official Rosemary 4.19.325 tree with SuSFS..."
+          git clone --depth=1 -b A16-lineage-KS https://github.com/omrxm18/android_kernel_xiaomi_mt6785.git kernel_workspace
           cd kernel_workspace
-          echo "Kernel source downloaded successfully."
+          echo "Cloning KernelSU-Next legacy tree..."
+          git clone --depth=1 -b legacy https://github.com/omrxm18/KernelSU-Next.git KernelSU-Next
+          echo "Source trees ready."
 
-      - name: Download AOSP Clang Toolchain (Clang 18)
+      - name: Cache Clang Toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/toolchains/clang-r563880c
+          key: clang-r563880c-v1
+
+      - name: Download AOSP Clang (Android 16 QPR2 r563880c)
+        if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          mkdir -p clang-toolchain
-          cd clang-toolchain
-          echo "Downloading stable AOSP Clang..."
-          curl -LO "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz"
-          tar -xzf clang-r487747c.tar.gz
-          rm -f clang-r487747c.tar.gz
-          echo "Clang version:"
-          ./bin/clang --version
+          TOOLCHAIN_DIR="${{ github.workspace }}/toolchains/clang-r563880c"
+          mkdir -p "$TOOLCHAIN_DIR"
+          echo "Downloading Android 16 Clang toolchain..."
+          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/heads/android16-qpr2-release/clang-r563880c.tar.gz" -o /tmp/clang.tar.gz
+          tar -xzf /tmp/clang.tar.gz -C "$TOOLCHAIN_DIR"
+          rm -f /tmp/clang.tar.gz
 
-      - name: Integrate KernelSU Next & SuSFS
-        if: ${{ inputs.enable_ksu }}
+      - name: Verify Toolchain
         run: |
-          cd kernel_workspace
-          echo "Setting up KernelSU Next..."
-          # Download official KernelSU-Next setup script
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" -o setup_ksu.sh || true
-          if [ -s setup_ksu.sh ] && ! grep -q "404" setup_ksu.sh; then
-            bash setup_ksu.sh legacy || bash setup_ksu.sh || true
-          else
-            echo "Fallback: Manual KernelSU-Next integration..."
-            git clone --depth=1 -b legacy https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
-            mkdir -p drivers/kernelsu
-            ln -sf ../../KernelSU-Next/kernel drivers/kernelsu
-            grep -q "kernelsu" drivers/Makefile || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> drivers/Makefile
-            grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" drivers/Kconfig
-          fi
+          "${{ github.workspace }}/toolchains/clang-r563880c/bin/clang" --version
 
-          if [ "${{ inputs.enable_susfs }}" = "true" ]; then
-            echo "Setting up SuSFS..."
-            git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.19 susfs_source || true
-            if [ -d "susfs_source/kernel_patches" ]; then
-              echo "Applying SuSFS patches..."
-              cp -f susfs_source/kernel_patches/50_add_susfs_in_kernel-4.19.patch ./ || true
-              patch -p1 -N < 50_add_susfs_in_kernel-4.19.patch || true
-              cp -f susfs_source/kernel_patches/fs/* fs/ 2>/dev/null || true
-              cp -f susfs_source/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
-              if [ -d "KernelSU-Next" ]; then
-                cp -f susfs_source/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU-Next/ || true
-                cd KernelSU-Next && patch -p1 -N < 10_enable_susfs_for_ksu.patch || true
-                cd ..
-              fi
-            fi
-            rm -rf susfs_source || true
-          fi
-
-      - name: Apply FeiRui Anti-Crash & Tethering Patches
+      - name: Apply FeiRui Anti-Crash & Performance Patches
         run: |
           cd kernel_workspace
-          echo "Applying Deep Sleep (aggressive_idle_pull) null check..."
-          # Patch aggressive_idle_pull to safely return if rq or cpu is invalid
-          for f in $(grep -rnwl "aggressive_idle_pull" kernel/sched/ 2>/dev/null || true); do
-            echo "Patching $f..."
-            sed -i '/aggressive_idle_pull.*{/a \	if (!rq || cpu < 0 || cpu >= nr_cpu_ids) return 0;' "$f" || true
-          done
+          echo "Applying Deep Sleep Anti-Crash patch (Fix aggressive_idle_pull)..."
+          # Matikan MTK_IDLE_BALANCE_ENHANCEMENT agar bug panic aggressive_idle_pull hilang total
+          sed -i 's/CONFIG_MTK_IDLE_BALANCE_ENHANCEMENT=y/# CONFIG_MTK_IDLE_BALANCE_ENHANCEMENT is not set/' arch/arm64/configs/rosemary_defconfig
+          sed -i 's/pulled_task = aggressive_idle_pull(this_cpu);/\/* FeiRui anti-crash *\/ pulled_task = 0;/g' kernel/sched/fair.c 2>/dev/null || true
 
-          echo "Applying USB Tethering fixes..."
+          echo "Applying USB Tethering fix..."
           for f in $(grep -rnwl "rndis_wceis" drivers/usb/gadget/ 2>/dev/null || true); do
-            echo "Patching $f..."
             sed -i 's/rndis_wceis/rndis_generic/g' "$f" 2>/dev/null || true
           done
 
-      - name: Configure FeiRui Kernel Defconfig
-        run: |
-          cd kernel_workspace
+          echo "Configuring FeiRui branding & enhancements..."
           DEFCONFIG="arch/arm64/configs/rosemary_defconfig"
-          
-          # Custom kernel identity
           sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-FeiRui-v1.0"/' $DEFCONFIG
           
-          # Root & Stealth
-          echo "CONFIG_KSU=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=n" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> $DEFCONFIG
-          
-          # Networking: BBR & Westwood+
+          # Networking & Performance
           echo "CONFIG_TCP_CONG_BBR=y" >> $DEFCONFIG
           echo "CONFIG_TCP_CONG_WESTWOOD=y" >> $DEFCONFIG
           echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> $DEFCONFIG
           echo "CONFIG_NETFILTER_XT_TARGET_HL=y" >> $DEFCONFIG
-          
-          # Memory & Performance
-          echo "CONFIG_SLUB=y" >> $DEFCONFIG
-          echo "CONFIG_SLUB_CPU_PARTIAL=y" >> $DEFCONFIG
           echo "CONFIG_ZRAM=y" >> $DEFCONFIG
           echo "CONFIG_ZRAM_DEF_COMP_ZSTD=y" >> $DEFCONFIG
           echo "CONFIG_ZRAM_DEF_COMP=\"zstd\"" >> $DEFCONFIG
-          
-          # Native WireGuard
           echo "CONFIG_WIREGUARD=y" >> $DEFCONFIG
 
-      - name: Build Kernel
+      - name: Build FeiRui Kernel
         run: |
           cd kernel_workspace
-          export PATH="$(pwd)/../clang-toolchain/bin:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
-
-          echo "Making defconfig..."
-          make O=out rosemary_defconfig
-
-          echo "Compiling FeiRui Kernel..."
-          make -j$(nproc --all) O=out \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            Image.gz-dtb || make -j$(nproc --all) O=out CC=clang LD=ld.lld Image.gz
-
-          if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "Build SUCCESSFUL: Image.gz-dtb generated."
-          elif [ -f "out/arch/arm64/boot/Image.gz" ]; then
-            echo "Build SUCCESSFUL: Image.gz generated."
-          else
-            echo "Kernel Image not found!"
-            exit 1
-          fi
-
-      - name: Package with AnyKernel3
-        run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AK3
-          cd AK3
-          # Set AnyKernel properties
-          sed -i 's/kernel.string=.*/kernel.string=FeiRui Kernel v1.0 by fiannaaa/' anykernel.sh
-          sed -i 's/device.name1=.*/device.name1=rosemary/' anykernel.sh
-          sed -i 's/device.name2=.*/device.name2=rosemary_p/' anykernel.sh
-          sed -i 's/device.name3=.*/device.name3=secret/' anykernel.sh
-          sed -i 's/device.name4=.*/device.name4=maltose/' anykernel.sh
-          sed -i 's/block=.*/block=\/dev\/block\/by-name\/boot;/' anykernel.sh
-          sed -i 's/is_slot_device=.*/is_slot_device=1;/' anykernel.sh
-
-          # Copy kernel image
-          if [ -f "../kernel_workspace/out/arch/arm64/boot/Image.gz-dtb" ]; then
-            cp -f ../kernel_workspace/out/arch/arm64/boot/Image.gz-dtb Image.gz-dtb
-          elif [ -f "../kernel_workspace/out/arch/arm64/boot/Image.gz" ]; then
-            cp -f ../kernel_workspace/out/arch/arm64/boot/Image.gz Image.gz
-          fi
-
-          # Create flashable zip
-          zip -r9 ../FeiRui-Kernel-rosemary-v1.0.zip * -x .git README.md *placeholder
-          echo "AnyKernel3 package created: FeiRui-Kernel-rosemary-v1.0.zip"
+          chmod +x build.sh
+          ./build.sh --toolchain "${{ github.workspace }}/toolchains/clang-r563880c/bin"
 
       - name: Upload Kernel Artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: FeiRui-Kernel-rosemary-v1.0
-          path: FeiRui-Kernel-rosemary-v1.0.zip
+          path: kernel_workspace/builds/*.zip
           retention-days: 7
+
+      - name: Upload Error Logs (If Failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            kernel_workspace/build.log
+            kernel_workspace/errors.log
+          if-no-files-found: ignorea
