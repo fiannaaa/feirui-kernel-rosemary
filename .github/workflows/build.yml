@@ -21,12 +21,12 @@ jobs:
 
       - name: Clone Rosemary Android 16 Kernel Source (4.19.325)
         run: |
-          echo "Cloning official Rosemary 4.19.325 tree with SuSFS..."
-          git clone --depth=1 -b A16-lineage-KS https://github.com/omrxm18/android_kernel_xiaomi_mt6785.git kernel_workspace
+          echo "Cloning verified A16-lineage Rosemary kernel source..."
+          git clone --depth=1 -b A16-lineage https://github.com/omrxm18/android_kernel_xiaomi_mt6785.git kernel_workspace
           cd kernel_workspace
-          echo "Cloning KernelSU-Next legacy tree..."
-          git clone --depth=1 -b legacy https://github.com/omrxm18/KernelSU-Next.git KernelSU-Next
-          echo "Source trees ready."
+          echo "Syncing KernelSU-Next submodule..."
+          git submodule update --init --recursive || git clone --depth=1 -b legacy https://github.com/omrxm18/KernelSU-Next.git KernelSU-Next
+          echo "Kernel tree ready."
 
       - name: Cache Clang Toolchain
         id: cache-clang
@@ -52,9 +52,8 @@ jobs:
       - name: Apply FeiRui Anti-Crash & Performance Patches
         run: |
           cd kernel_workspace
-          echo "Applying Deep Sleep Anti-Crash patch (Fix aggressive_idle_pull)..."
-          # Matikan MTK_IDLE_BALANCE_ENHANCEMENT agar bug panic aggressive_idle_pull hilang total
-          sed -i 's/CONFIG_MTK_IDLE_BALANCE_ENHANCEMENT=y/# CONFIG_MTK_IDLE_BALANCE_ENHANCEMENT is not set/' arch/arm64/configs/rosemary_defconfig
+          echo "Applying Deep Sleep Anti-Crash patch..."
+          sed -i 's/CONFIG_MTK_IDLE_BALANCE_ENHANCEMENT=y/# CONFIG_MTK_IDLE_BALANCE_ENHANCEMENT is not set/' arch/arm64/configs/rosemary_defconfig || true
           sed -i 's/pulled_task = aggressive_idle_pull(this_cpu);/\/* FeiRui anti-crash *\/ pulled_task = 0;/g' kernel/sched/fair.c 2>/dev/null || true
 
           echo "Applying USB Tethering fix..."
@@ -89,13 +88,3 @@ jobs:
           name: FeiRui-Kernel-rosemary-v1.0
           path: kernel_workspace/builds/*.zip
           retention-days: 7
-
-      - name: Upload Error Logs (If Failed)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            kernel_workspace/build.log
-            kernel_workspace/errors.log
-          if-no-files-found: ignorea
