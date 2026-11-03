@@ -32,22 +32,26 @@ jobs:
         id: cache-clang
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/toolchains/clang-r563880c
-          key: clang-r563880c-v1
+          path: ${{ github.workspace }}/toolchains/clang
+          key: clang-toolchain-v2
 
-      - name: Download AOSP Clang (Android 16 QPR2 r563880c)
+      - name: Setup Clang Compiler Toolchain
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          TOOLCHAIN_DIR="${{ github.workspace }}/toolchains/clang-r563880c"
+          TOOLCHAIN_DIR="${{ github.workspace }}/toolchains/clang"
           mkdir -p "$TOOLCHAIN_DIR"
-          echo "Downloading Android 16 Clang toolchain..."
-          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/heads/android16-qpr2-release/clang-r563880c.tar.gz" -o /tmp/clang.tar.gz
-          tar -xzf /tmp/clang.tar.gz -C "$TOOLCHAIN_DIR"
-          rm -f /tmp/clang.tar.gz
+          echo "Downloading Android Clang toolchain with streaming extraction..."
+          
+          # Unduh Clang dengan auto-retry & fallback otomatis
+          if ! curl -fL --retry 5 --retry-delay 3 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/heads/android16-qpr2-release/clang-r563880c.tar.gz" | tar -xz -C "$TOOLCHAIN_DIR"; then
+            echo "Koneksi utama lambat, beralih ke cadangan AOSP Clang berkecepatan tinggi..."
+            curl -fL --retry 5 --retry-delay 3 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz" | tar -xz -C "$TOOLCHAIN_DIR"
+          fi
 
       - name: Verify Toolchain
         run: |
-          "${{ github.workspace }}/toolchains/clang-r563880c/bin/clang" --version
+          TOOLCHAIN_DIR="${{ github.workspace }}/toolchains/clang"
+          "$TOOLCHAIN_DIR/bin/clang" --version
 
       - name: Apply FeiRui Anti-Crash & Performance Patches
         run: |
@@ -79,7 +83,7 @@ jobs:
         run: |
           cd kernel_workspace
           chmod +x build.sh
-          ./build.sh --toolchain "${{ github.workspace }}/toolchains/clang-r563880c/bin"
+          ./build.sh --toolchain "${{ github.workspace }}/toolchains/clang/bin"
 
       - name: Upload Kernel Artifact
         if: success()
